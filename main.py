@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import shutil
+import hashlib
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
@@ -44,6 +45,7 @@ class MediaOrganizer:
         self.target_directory = Path(target_directory)
         self.media_type = media_type
         self.processed_files = set()
+        self.hash_filename = ".media_hashes.json"
         
         # Initialize LLM
         self.llm = ChatOpenAI(
@@ -57,7 +59,7 @@ class MediaOrganizer:
         self.jinja_env = Environment(loader=FileSystemLoader('templates'))
         
         # Create agent with tools
-        self.tools = [self.search_tmdb, self.move_rename_file, self.mark_completed]
+        self.tools = [self.search_tmdb, self.move_rename_file, self.mark_completed, self.calculate_folder_hashes]
         self.agent = self._create_agent()
         
     def _create_agent(self):
@@ -136,18 +138,55 @@ class MediaOrganizer:
     def mark_completed(file_path: str) -> str:
         """Mark a file as completed and properly organized"""
         return f"File {file_path} has been marked as completed and properly organized."
-    
+
+    @tool
+    def calculate_folder_hashes(folder_path: str) -> str:
+        """Calculate MD5 hashes for all files in a folder and save them to a hash file"""
+        try:
+            folder = Path(folder_path)
+            if not folder.is_dir():
+                return f"Error: {folder_path} is not a directory"
+
+            hash_file = folder / ".media_hashes.json"
+            file_hashes = {}
+
+            for file_path in folder.rglob("*"):
+                if file_path.is_file() and file_path.name != ".media_hashes.json":
+                    md5_hash = hashlib.md5()
+                    with open(file_path, "rb") as f:
+                        for chunk in iter(lambda: f.read(4096), b""):
+                            md5_hash.update(chunk)
+                    file_hashes[str(file_path.relative_to(folder))] = md5_hash.hexdigest()
+
+            with open(hash_file, "w") as f:
+                json.dump(file_hashes, f, indent=2)
+
+            return f"Successfully created hash file for {folder_path}"
+
+        except Exception as e:
+            return f"Error calculating hashes: {str(e)}"
+
     def get_directory_state(self) -> Dict[str, Any]:
         """Get current state of the target directory"""
         files = []
         for item in self.target_directory.rglob("*"):
-            if item.is_file() and str(item) not in self.processed_files:
-                files.append({
-                    "path": str(item),
-                    "name": item.name,
-                    "size": item.stat().st_size,
-                    "parent": str(item.parent)
-                })
+            if item.is_file():
+                # Skip if the file is a hash file
+                if item.name == self.hash_filename:
+                    continue
+                    
+                # Skip if parent directory has a hash file
+                if (item.parent / self.hash_filename).exists():
+                    continue
+                    
+                # Skip if already processed
+                if str(item) not in self.processed_files:
+                    files.append({
+                        "path": str(item),
+                        "name": item.name,
+                        "size": item.stat().st_size,
+                        "parent": str(item.parent)
+                    })
         
         return {
             "directory": str(self.target_directory),
